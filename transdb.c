@@ -12,6 +12,38 @@ TODO:
 	- wielowatkowosc
 	*/
 
+/* ROZWIAZANIE:
+	Z treści zadania - 3 warunki poprawnej bazy danych:
+	1. Transakcja kończy się, gdy zostanie zatwierdzona lub porzucona przez 
+	   użytkownika. Zmiany dokonane w zatwierdzonej transakcji permanentnie stają 
+		się częścią bazy danych, a zmiany dokonane w porzuconej transkacji giną 
+		bezpowrotnie.
+	2. Transakcje widzą wyniki wcześniejszych zatwierdzonych transakcji, ale nie 
+	   widzą zmian z niezatwierdzonych transakcji.
+	3. “Stan świata” widziany przez transakcję nie zmienia się w trakcie jej trwania.
+
+	Dostęp do bazy danych na zasadzie "Czytelnicy i Pisarze".
+	Proces, który otwiera /dev/transdb wiesza się na semaforze typu "Czytelnik".
+	Wszystkie operacje write są zapisywane na liście, będą wykonane, dopiero gdy
+	transakcja będzie zatwierdzona(wymaga tego warunek 2.).
+	Transakcje mogą być zatwierdzone dopiero jak wszystkie otwarte transakcje
+	zostaną porzucone, lub wysałane do zatwierdzenia(wymaga tego warunek 3.) - stąd
+	sposób blokowania dostępu do bazy danych na zasadzie "Czytelnicy i Pisarze".
+	Z warunku 3. nie będzie nigdy sytuacji, że przy write wiadomo już, że
+	transakcja nie ma szans się udać. 
+
+	Dane w bazie danych podzieliłem na 32 bajtowe bloki, każdy blok ma 4 bajty na
+	metadane: znaczniki czasu. 
+	*/
+
+/* HIERARCHIA SEMAFOROW
+	1. Czytelnicy/pisarze.
+	2. Semafor transakcyjny.
+	3. Semafor globalny.
+	Przykład:
+	Nie można blokować 2. mając zablokowany 3.
+	*/
+
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
@@ -22,6 +54,7 @@ TODO:
 #include <linux/rwlock_types.h>
 #include <linux/list.h>
 #include <asm/uaccess.h>
+#include "transdb.h"
 
 MODULE_AUTHOR("Krzysztof Leszczynski kl319367@students.mimuw.edu.pl");
 MODULE_DESCRIPTION("Database");
@@ -33,29 +66,50 @@ MODULE_LICENSE("GPL");
 
 int transdb_major;
 uint8_t db[MAX_SIZE];
-rwlock_t db_rwlock;
-char db_dirty;
+struct rw_semaphore db_rwsema;
+struct semaphore db_glsema;
+uint32_t db_timestamp, db_counter;
 
 struct needle {
-	off_t pos;
+	loff_t pos;
 	uint8_t data;
 	struct list_head list;
 };
 
 struct transaction {
+	uint32_t id;
 	struct list_head list; //list of needles
 	struct semaphore sema;
 };
 
+void is_active(struct transaction *trans) {
+	char bool = 0;
+	down(&trans->sema);
+	if(trans->id == 0) {
+		down(&db_glsema);
+		db_counter++;
+		trans->id = db_counter;
+		up(&db_glsema);
+		bool = 1;
+	}
+	up(&trans->sema);
+	if(bool) down_read(&db_rwsema);
+}
 
 int transdb_open(struct inode *inode, struct file *file) {
 	struct transaction *trans = kmalloc(sizeof(struct transaction), GFP_KERNEL);
 	if(trans == 0) goto error;
 	INIT_LIST_HEAD(&trans->list);
 	sema_init(&trans->sema, 1);
+
+	down(&db_glsema);
+	db_counter++;
+	trans->id = db_counter;
+	up(&db_glsema);
+
 	file->private_data = trans;
 	printk(KERN_WARNING "Transdb open\n");
-	read_lock(&db_rwlock);
+	down_read(&db_rwsema);
 	
 	return 0;
 error:
@@ -63,7 +117,9 @@ error:
 }
 
 ssize_t transdb_read(struct file *filp, char __user *buff, size_t count, loff_t *offp) {
-	printk(KERN_WARNING "Transdb read\n");
+	struct transaction *trans = (struct transaction*)filp->private_data;
+	is_active(trans);
+
 	if(copy_to_user(buff, db + *offp, count)) return -EFAULT;
 	*offp += count;
 	return count;
@@ -72,10 +128,10 @@ ssize_t transdb_read(struct file *filp, char __user *buff, size_t count, loff_t 
 ssize_t transdb_write(struct file *filp, const char __user *buff, size_t count,
 		                loff_t *offp) {
 	struct transaction *trans = (struct transaction *)(filp->private_data);
+	is_active(trans);
 	struct needle *op;
 	int size = count;
-	printk(KERN_WARNING "Transdb write\n");
-	up(&trans->sema);
+	down(&trans->sema);
 	while(count) {
 		op = kmalloc(sizeof(struct needle), GFP_KERNEL); 
 		if(op == 0) goto out;
@@ -90,39 +146,82 @@ ssize_t transdb_write(struct file *filp, const char __user *buff, size_t count,
 		buff++;
 	}
 out:
-	down(&trans->sema);
+	up(&trans->sema);
 	return size - count;
 }
 
-void finish_trans(struct transaction *trans, char flag) {
-	read_unlock(&db_rwlock);
-	down(&trans->sema);
-	if(!list_empty(&trans->list)) {
-		struct needle *pos;
-		struct needle *temp;
-		if(flag & ACCEPT) write_lock(&db_rwlock);
-		list_for_each_entry_safe(pos, temp, &trans->list, list) {
-			if(flag & ACCEPT) db[pos->pos] = pos->data;
-			list_del(&pos->list);
-			kfree(pos);
-		}
-		if(flag & ACCEPT) write_unlock(&db_rwlock);
+void delete_list_with_lock(struct transaction *trans) {		
+	struct needle *pos;
+	struct needle *temp;
+	
+	list_for_each_entry_safe(pos, temp, &trans->list, list) {			
+		list_del(&pos->list);
+		kfree(pos);
 	}
+	trans->id = 0;
 	up(&trans->sema);
 }
+void delete_list(struct transaction *trans) {
+	down(&trans->sema);
+	delete_list_with_lock(trans);
+}
 
-void accept_trans(struct transaction *trans) {
-	finish_trans(trans, ACCEPT);
+int accept_trans(struct transaction *trans) {
+	int ret, bool = 0;
+	up_read(&db_rwsema);
+	down_write(&db_rwsema); 
+	down(&trans->sema);
+	down(&db_glsema);
+
+	if(trans->id < db_timestamp) {
+		printk(KERN_EMERG "DEADLOCK\n");
+		up(&db_glsema);
+		up_write(&db_rwsema);
+		delete_list_with_lock(trans);
+		return -EDEADLK;
+	}
+	db_timestamp = db_counter;
+	up(&db_glsema);
+	trans->id = 0;
+
+	struct needle *pos;
+	struct needle *temp;
+
+	list_for_each_entry_safe(pos, temp, &trans->list, list) {
+	  	printk(KERN_WARNING "Write %c on pos %d\n", pos->data, pos->pos);
+		db[pos->pos] = pos->data;
+		list_del(&pos->list);
+		kfree(pos);
+	}
+
+	up(&trans->sema);
+	up_write(&db_rwsema);
+	return 0;
 }
 void rollback_trans(struct transaction *trans) {
-	finish_trans(trans, ROLLBACK);
+	up_read(&db_rwsema);
+	delete_list(trans);
 }
 
 int transdb_release(struct inode *inode, struct file *filp) {
 	struct transaction *trans = (struct transaction*)filp->private_data;
 	printk(KERN_WARNING "Transdb release\n");
-	accept_trans(trans);
+	if(trans->id != 0) rollback_trans(trans);
+	kfree(trans);
 	return 0;
+}
+
+long transdb_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+	struct transaction *trans = (struct transaction*)filp->private_data;
+	long ret = 0;
+	switch(cmd) {
+		case DB_COMMIT:
+			ret = accept_trans(trans);
+			break;
+		case DB_ROLLBACK:
+			rollback_trans(trans);
+	}
+	return ret;
 }
 
 const static struct file_operations transdb_fops = {
@@ -134,16 +233,16 @@ const static struct file_operations transdb_fops = {
 	//pwrite: transdb_pwrite,
 	//lseek: transdb_lseek,
 	release: transdb_release,
-	//unlocked_ioctl: transdb_ioctl,
-	//compat_ioctl: transdb_ioctl
+	unlocked_ioctl: transdb_ioctl,
+	compat_ioctl: transdb_ioctl
 };
 
 int transdb_init_module(void) {
 	if((transdb_major = register_chrdev(0, "transdb", &transdb_fops)) < 0)
 		goto error;
 	printk(KERN_WARNING "Module init %d\n", transdb_major);
-	rwlock_init(&db_rwlock);
-	db_dirty = 0;
+	init_rwsem(&db_rwsema);
+	sema_init(&db_glsema, 1);
 	memset(db, MAX_SIZE, 0);
 	
 	return 0;
