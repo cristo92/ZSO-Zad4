@@ -12,7 +12,7 @@ char buff[10];
 
 int main() {
 	int fd, ret;
-	fd = open("/dev/transdb", O_RDWR);
+	fd = open("/dev/db", O_RDWR);
 	if(fd < 0) {
 		printf("FAIL: open2 errno: %d, %s\n", errno, strerror(errno));
 	}

@@ -14,7 +14,7 @@ char buff[10];
 int main(int argc, char **argv) {
 	assert(argc > 2);
 	int fd, n, ret;
-	fd = open("/dev/transdb", O_WRONLY);
+	fd = open("/dev/db", O_WRONLY);
 	if(fd < 0) {
 		printf("FAIL: open1 errno: %d, %s\n", errno, strerror(errno));
 	}

@@ -6,13 +6,14 @@
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
+#include "transdb.h"
 
 char data[] = "Teatr-Akcje";
 char buff[10];
 
 int main() {
 	int fd, ret;
-	fd = open("/dev/transdb", O_RDWR);
+	fd = open("/dev/db", O_RDWR);
 	if(fd < 0) {
 		printf("FAIL: open1 errno: %d, %s\n", errno, strerror(errno));
 	}
@@ -22,9 +23,14 @@ int main() {
 		printf("FAIL: write1: %d errno: %d, %s\n", ret, errno, strerror(errno));
 	}
 	assert(ret == 10);
+	ret = ioctl(fd, DB_COMMIT);
+	if(ret != 0) {
+		printf("FAIL: db_commit errno: %d, %s\n", errno, strerror(errno));
+	}
+	assert(ret == 0);
 	close(fd);
 
-	fd = open("/dev/transdb", O_RDWR);
+	fd = open("/dev/db", O_RDWR);
 	if(fd < 0) {
 		printf("FAIL: open2 errno: %d, %s\n", errno, strerror(errno));
 	}

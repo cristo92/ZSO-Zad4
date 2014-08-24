@@ -5,7 +5,6 @@
 
 /*
 TODO:
-	sysfs
 	co to znaczy nieskonczona baza danych?
 	*/
 
@@ -24,12 +23,11 @@ TODO:
 	3. “Stan świata” widziany przez transakcję nie zmienia się w trakcie jej trwania.
 
 	Dostęp do bazy danych na zasadzie "Czytelnicy i Pisarze".
-	Proces, który otwiera /dev/transdb wiesza się na semaforze typu "Czytelnik".
+	Proces, który otwiera /dev/db wiesza się na semaforze typu "Czytelnik".
 	Wszystkie operacje write są zapisywane na liście, będą wykonane, dopiero gdy
 	transakcja będzie zatwierdzona(wymaga tego warunek 2.).
 	Transakcje mogą być zatwierdzone dopiero jak wszystkie otwarte transakcje
-	zostaną porzucone, lub wysałane do zatwierdzenia(wymaga tego warunek 3.) - stąd
-	sposób blokowania dostępu do bazy danych na zasadzie "Czytelnicy i Pisarze".
+	zostaną porzucone, lub wysałane do zatwierdzenia(wymaga tego warunek 3.)
 	Z warunku 3. nie będzie nigdy sytuacji, że przy write wiadomo już, że
 	transakcja nie ma szans się udać. 
 	
@@ -76,7 +74,7 @@ MODULE_AUTHOR("Krzysztof Leszczynski kl319367@students.mimuw.edu.pl");
 MODULE_DESCRIPTION("Database");
 MODULE_LICENSE("GPL");
 
-#define MAX_SIZE 1024
+#define MAX_SIZE 1024024
 #define ACCEPT 1
 #define ROLLBACK 2
 #define db_minor 123
@@ -111,10 +109,12 @@ void is_active(struct transaction *trans) {
 	up(&trans->sema);
 	if(bool) {
 		down_read(&db_rwsema);
+		down(&trans->sema);
 		down(&db_glsema);
 		db_counter++;
 		trans->id = db_counter;
 		up(&db_glsema);
+		up(&trans->sema);
 	}
 }
 
@@ -131,7 +131,7 @@ int transdb_open(struct inode *inode, struct file *file) {
 	up(&db_glsema);
 
 	file->private_data = trans;
-	printk(KERN_WARNING "Transdb open\n");
+	printk(KERN_WARNING "Transdb open %d\n", trans->id);
 	
 	return 0;
 error:
@@ -195,10 +195,10 @@ int accept_trans(struct transaction *trans) {
 	up_read(&db_rwsema);
 	down_write(&db_rwsema); 
 	down(&trans->sema);
+	printk(KERN_WARNING "Accept trans: %d\n", trans->id);
 	down(&db_glsema);
 
 	if(trans->id <= db_timestamp) {
-		printk(KERN_EMERG "DEADLOCK\n");
 		up(&db_glsema);
 		up_write(&db_rwsema);
 		delete_list_with_lock(trans);
@@ -209,7 +209,6 @@ int accept_trans(struct transaction *trans) {
 	trans->id = 0;
 
 	list_for_each_entry_safe(pos, temp, &trans->list, list) {
-	  	printk(KERN_WARNING "Write %c on pos %d\n", pos->data, pos->pos);
 		db[pos->pos] = pos->data;
 		list_del(&pos->list);
 		kfree(pos);
