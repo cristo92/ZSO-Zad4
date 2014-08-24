@@ -5,6 +5,7 @@
 
 /*
 TODO:
+	sysfs
 	co to znaczy nieskonczona baza danych?
 	*/
 
@@ -31,7 +32,22 @@ TODO:
 	sposób blokowania dostępu do bazy danych na zasadzie "Czytelnicy i Pisarze".
 	Z warunku 3. nie będzie nigdy sytuacji, że przy write wiadomo już, że
 	transakcja nie ma szans się udać. 
+	
+	Tworzenie transakcji:
+		- Czekam na semafor "Czytelnik"
+		- Zwiększam licznik transakcji o jeden(db_counter)
+		- Nadaje transakcji numer(db_counter)
+		
+	Zatwierdzanie transakcji:
+		1. Zwalniam semafor "Czytelnik"
+		2. Czekam na semafor "Pisarz"
+		3. Sprawdzam, czy numer mojej transakcji jest większy od db_timestamp
+		4. Jeśli jest, to ustalam db_timestamp na db_counter i realizuje zaksięgowane
+		   operacje write dotyczące tej transakcji
+		- Proszę zwrócić uwagę, że w kroku 4. wszystkie otwarte transakcje zostały 
+		  utworzone przed zapisaniem, tej transakcji, więc będą musiały być porzucone.
 
+TODO:
 	Dane w bazie danych podzieliłem na 32 bajtowe bloki, każdy blok ma 4 bajty na
 	metadane: znaczniki czasu. 
 	*/
@@ -63,8 +79,12 @@ MODULE_LICENSE("GPL");
 #define MAX_SIZE 1024
 #define ACCEPT 1
 #define ROLLBACK 2
+#define db_minor 123
 
-int transdb_major;
+dev_t db_dev;
+int db_major;
+struct class *db_class;
+struct device *db_device;
 uint8_t db[MAX_SIZE];
 struct rw_semaphore db_rwsema;
 struct semaphore db_glsema;
@@ -86,14 +106,16 @@ void is_active(struct transaction *trans) {
 	char bool = 0;
 	down(&trans->sema);
 	if(trans->id == 0) {
+		bool = 1;
+	}
+	up(&trans->sema);
+	if(bool) {
+		down_read(&db_rwsema);
 		down(&db_glsema);
 		db_counter++;
 		trans->id = db_counter;
 		up(&db_glsema);
-		bool = 1;
 	}
-	up(&trans->sema);
-	if(bool) down_read(&db_rwsema);
 }
 
 int transdb_open(struct inode *inode, struct file *file) {
@@ -102,6 +124,7 @@ int transdb_open(struct inode *inode, struct file *file) {
 	INIT_LIST_HEAD(&trans->list);
 	sema_init(&trans->sema, 1);
 
+	down_read(&db_rwsema);
 	down(&db_glsema);
 	db_counter++;
 	trans->id = db_counter;
@@ -109,7 +132,6 @@ int transdb_open(struct inode *inode, struct file *file) {
 
 	file->private_data = trans;
 	printk(KERN_WARNING "Transdb open\n");
-	down_read(&db_rwsema);
 	
 	return 0;
 error:
@@ -128,9 +150,9 @@ ssize_t transdb_read(struct file *filp, char __user *buff, size_t count, loff_t 
 ssize_t transdb_write(struct file *filp, const char __user *buff, size_t count,
 		                loff_t *offp) {
 	struct transaction *trans = (struct transaction *)(filp->private_data);
-	is_active(trans);
 	struct needle *op;
 	int size = count;
+	is_active(trans);
 	down(&trans->sema);
 	while(count) {
 		op = kmalloc(sizeof(struct needle), GFP_KERNEL); 
@@ -167,13 +189,15 @@ void delete_list(struct transaction *trans) {
 }
 
 int accept_trans(struct transaction *trans) {
-	int ret, bool = 0;
+	struct needle *pos;
+	struct needle *temp;
+
 	up_read(&db_rwsema);
 	down_write(&db_rwsema); 
 	down(&trans->sema);
 	down(&db_glsema);
 
-	if(trans->id < db_timestamp) {
+	if(trans->id <= db_timestamp) {
 		printk(KERN_EMERG "DEADLOCK\n");
 		up(&db_glsema);
 		up_write(&db_rwsema);
@@ -183,9 +207,6 @@ int accept_trans(struct transaction *trans) {
 	db_timestamp = db_counter;
 	up(&db_glsema);
 	trans->id = 0;
-
-	struct needle *pos;
-	struct needle *temp;
 
 	list_for_each_entry_safe(pos, temp, &trans->list, list) {
 	  	printk(KERN_WARNING "Write %c on pos %d\n", pos->data, pos->pos);
@@ -224,7 +245,7 @@ long transdb_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	return ret;
 }
 
-const static struct file_operations transdb_fops = {
+const static struct file_operations db_fops = {
 	owner: THIS_MODULE,
 	open: transdb_open,
 	read: transdb_read,
@@ -238,20 +259,38 @@ const static struct file_operations transdb_fops = {
 };
 
 int transdb_init_module(void) {
-	if((transdb_major = register_chrdev(0, "transdb", &transdb_fops)) < 0)
+ 	int res;
+	if((res = register_chrdev(0, "db", &db_fops)) < 0)
 		goto error;
-	printk(KERN_WARNING "Module init %d\n", transdb_major);
+	db_major = res;
+	db_dev = MKDEV(db_major, db_minor); 
+	db_class = class_create(THIS_MODULE, "transdb");
+	if(IS_ERR(db_class)) {
+		res = PTR_ERR((void*)db_class);
+		goto error2;
+	}
+	db_device = device_create(db_class, 0, db_dev, 0, "db");
+	if(IS_ERR(db_device)) {
+		res = PTR_ERR(db_device);
+		goto error2;
+	}
+
+	printk(KERN_WARNING "Module init %d\n", db_major);
 	init_rwsem(&db_rwsema);
 	sema_init(&db_glsema, 1);
 	memset(db, MAX_SIZE, 0);
 	
 	return 0;
+error2:
+	unregister_chrdev(db_major, "db");
 error:
-	return transdb_major;
+	return res;
 }
 
 void transdb_cleanup_module(void) {
-	unregister_chrdev(transdb_major, "transdb");
+	unregister_chrdev(db_major, "db");
+	device_destroy(db_class, db_dev);
+	class_destroy(db_class);
 }
 
 module_init(transdb_init_module);
