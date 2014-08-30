@@ -6,6 +6,7 @@
 /*
 TODO:
 	co to znaczy nieskonczona baza danych?
+	Test4 na llseek (nie umiem wywolac w userspace llseek)
 	*/
 
 /* TESTOWANIE:
@@ -67,6 +68,7 @@ TODO:
 #include <linux/wait.h>
 #include <linux/rwlock_types.h>
 #include <linux/list.h>
+#include <linux/rbtree.h>
 #include <asm/uaccess.h>
 #include "transdb.h"
 
@@ -74,7 +76,7 @@ MODULE_AUTHOR("Krzysztof Leszczynski kl319367@students.mimuw.edu.pl");
 MODULE_DESCRIPTION("Database");
 MODULE_LICENSE("GPL");
 
-#define MAX_SIZE 1024024
+#define DB_SIZE 1024024
 #define ACCEPT 1
 #define ROLLBACK 2
 #define db_minor 123
@@ -83,7 +85,7 @@ dev_t db_dev;
 int db_major;
 struct class *db_class;
 struct device *db_device;
-uint8_t db[MAX_SIZE];
+uint8_t db[DB_SIZE];
 struct rw_semaphore db_rwsema;
 struct semaphore db_glsema;
 uint32_t db_timestamp, db_counter;
@@ -146,6 +148,12 @@ ssize_t transdb_read(struct file *filp, char __user *buff, size_t count, loff_t 
 	*offp += count;
 	return count;
 }
+ssize_t transdb_pread(struct file *filp, char __user *buff, size_t count, loff_t offp) {
+	int ret;
+	ret = transdb_read(filp, buff, count, &offp);
+	if(ret >= 0) offp -= ret;
+	return ret;
+}
 
 ssize_t transdb_write(struct file *filp, const char __user *buff, size_t count,
 		                loff_t *offp) {
@@ -170,6 +178,25 @@ ssize_t transdb_write(struct file *filp, const char __user *buff, size_t count,
 out:
 	up(&trans->sema);
 	return size - count;
+}
+ssize_t transdb_pwrite(struct file *filp, char __user *buff, size_t count, loff_t offp) {
+	int ret = transdb_write(filp, buff, count, &offp);
+	if(ret >= 0) offp -= ret;
+	return ret;
+}
+
+loff_t transdb_llseek(struct file *filp, loff_t off, int whence) {
+	switch(whence) {
+		case SEEK_SET:
+			filp->f_pos = off;
+			break;
+		case SEEK_CUR:
+			filp->f_pos += off;
+			break;
+		case SEEK_END:
+			filp->f_pos = DB_SIZE + off;
+	}
+	return filp->f_pos;
 }
 
 void delete_list_with_lock(struct transaction *trans) {		
@@ -251,7 +278,7 @@ const static struct file_operations db_fops = {
 	//pread: transdb_pread,
 	write: transdb_write,
 	//pwrite: transdb_pwrite,
-	//lseek: transdb_lseek,
+	llseek: transdb_llseek,
 	release: transdb_release,
 	unlocked_ioctl: transdb_ioctl,
 	compat_ioctl: transdb_ioctl
@@ -277,7 +304,7 @@ int transdb_init_module(void) {
 	printk(KERN_WARNING "Module init %d\n", db_major);
 	init_rwsem(&db_rwsema);
 	sema_init(&db_glsema, 1);
-	memset(db, MAX_SIZE, 0);
+	memset(db, DB_SIZE, 0);
 	
 	return 0;
 error2:
