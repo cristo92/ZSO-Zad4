@@ -41,8 +41,6 @@ int main() {
 		printf("FAIL: read2: %d fd: %d errno: %d, %s\n", ret, fd, errno, strerror(errno));
 	}
 	assert(ret == 40);
-	write(0, buff, 40);
-	printf("\n");
 	assert(strncmp(buff, data + 32 - 4, 40) == 0);
 	close(fd);
 }

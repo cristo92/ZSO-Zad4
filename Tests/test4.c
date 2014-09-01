@@ -37,7 +37,7 @@ int main() {
 		printf("FAIL: open2 errno: %d, %s\n", errno, strerror(errno));
 	}
 	assert(fd >= 0);
-	ret = llseek(fd, 0, 10, &off, SEEK_SET);
+	ret = lseek(fd, 10, SEEK_SET);
 	if(ret == -1)
 		printf("FAIL: lseek errno: %d, %s\n", errno, strerror(errno));
 	assert(ret > -1);
@@ -46,8 +46,6 @@ int main() {
 		printf("FAIL: read2: %d fd: %d errno: %d, %s\n", ret, fd, errno, strerror(errno));
 	}
 	assert(ret == 10);
-	write(0, buff, 10);
-	printf("\n");
 	assert(strncmp(buff, data, 10) == 0);
 	close(fd);
 }

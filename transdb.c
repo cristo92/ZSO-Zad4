@@ -3,69 +3,6 @@
  * 319367
  */
 
-/*
-TODO:
-	Czyszczenie bazy danych przy odmontowaniu
-	Test4 na llseek (nie umiem wywolac w userspace llseek)
-	Test7 z watkami pthread
-	Test8 na równoległy odczyt
-	*/
-
-/* TESTOWANIE:
-	Opisane w testall.sh
-	*/
-
-/* ROZWIAZANIE:
-	Z treści zadania - 3 warunki poprawnej bazy danych:
-	1. Transakcja kończy się, gdy zostanie zatwierdzona lub porzucona przez 
-	   użytkownika. Zmiany dokonane w zatwierdzonej transakcji permanentnie stają 
-		się częścią bazy danych, a zmiany dokonane w porzuconej transkacji giną 
-		bezpowrotnie.
-	2. Transakcje widzą wyniki wcześniejszych zatwierdzonych transakcji, ale nie 
-	   widzą zmian z niezatwierdzonych transakcji.
-	3. “Stan świata” widziany przez transakcję nie zmienia się w trakcie jej trwania.
-
-	Dostęp do bazy danych na zasadzie "Czytelnicy i Pisarze".
-	Proces, który otwiera /dev/db wiesza się na semaforze typu "Czytelnik".
-	Wszystkie operacje write są zapisywane na liście, będą wykonane, dopiero gdy
-	transakcja będzie zatwierdzona(wymaga tego warunek 2.).
-	Transakcje mogą być zatwierdzone dopiero jak wszystkie otwarte transakcje
-	zostaną porzucone, lub wysałane do zatwierdzenia(wymaga tego warunek 3.)
-	Z warunku 3. nie będzie nigdy sytuacji, że przy write wiadomo już, że
-	transakcja nie ma szans się udać. 
-	
-	Tworzenie transakcji:
-		- Czekam na semafor "Czytelnik"
-		- Zwiększam licznik transakcji o jeden(db_counter)
-		- Nadaje transakcji numer(db_counter)
-		
-	Zatwierdzanie transakcji:
-		1. Zwalniam semafor "Czytelnik"
-		2. Czekam na semafor "Pisarz"
-		3. Sprawdzam, czy numer mojej transakcji jest większy od db_timestamp
-		4. Jeśli jest, to ustalam db_timestamp na db_counter i realizuje zaksięgowane
-		   operacje write dotyczące tej transakcji
-		- Proszę zwrócić uwagę, że w kroku 4. wszystkie otwarte transakcje zostały 
-		  utworzone przed zapisaniem, tej transakcji, więc będą musiały być porzucone.
-
-	Nieskończona baza danych:
-		Bazę danych podzieliłem na 32-bajtowe bloki (struct db_block), które
-		przechowuję w strukturze rbtree (z bibliotek kernela).
-		Jak chcę się odwołać do jakiś danych w bazie danych, to najpierw lokalizuję
-		blok, który przechowuje te dane, później szukam bloku w drzewie, a następnie
-		jeśli bloku nie znalazłem to dodaję go do drzewa.
-		Poza tym struktura db_block przechowuje 4-bajtowy znacznik czasu - używany do
-		pozwalania na równoległe nieskonfliktowane zapisy.
-
-	*/
-
-/* HIERARCHIA SEMAFOROW
-	1. Czytelnicy/pisarze.
-	2. Semafor transakcyjny.
-	3. Semafor globalny.
-	Przykład:
-	Nie można blokować 2. mając zablokowany 3.
-	*/
 
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -93,7 +30,7 @@ struct class *db_class;
 struct device *db_device;
 struct rw_semaphore db_rwsema;
 struct semaphore db_glsema;
-uint32_t db_timestamp, db_counter;
+uint32_t db_counter;
 uint8_t ZERO_DATA[DB_BLOCK_SIZE];
 struct rb_root db_root;
 
@@ -348,7 +285,7 @@ int accept_trans(struct transaction *trans) {
 			memset(blk->data, 0, DB_BLOCK_SIZE);
 			rb_insert(&db_root, blk);
 		}
-		blk->ts = db_counter;
+		blk->ts = db_counter + 1;
 		memcpy(blk->data + pos->beg, 
 				 pos->data + pos->beg, 
 				 pos->end - pos->beg + 1);

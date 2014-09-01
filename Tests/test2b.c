@@ -22,7 +22,5 @@ int main() {
 		printf("FAIL: read2: %d fd: %d errno: %d, %s\n", ret, fd, errno, strerror(errno));
 	}
 	assert(ret == 5);
-	write(0, buff, 5);
-	printf("\n");
 	close(fd);
 }
