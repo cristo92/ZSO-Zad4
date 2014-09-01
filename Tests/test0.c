@@ -7,22 +7,18 @@
 #include <assert.h>
 #include <string.h>
 
-char data[] = "Teatr-Akcje";
-char buff[10];
+char buff[80];
 
-int main() {
+int main(int argc, char **argv) {
+	assert(argc > 2);
 	int fd, ret;
 	fd = open("/dev/db", O_RDWR);
 	if(fd < 0) {
 		printf("FAIL: open2 errno: %d, %s\n", errno, strerror(errno));
 	}
 	assert(fd >= 0);
-	ret = read(fd, buff, 5);
-	if(ret != 5) {
-		printf("FAIL: read2: %d fd: %d errno: %d, %s\n", ret, fd, errno, strerror(errno));
-	}
-	assert(ret == 5);
-	write(0, buff, 5);
+	ret = pread(fd, buff, atoi(argv[2]), atoi(argv[1]));
+	write(0, buff, atoi(argv[2]));
 	printf("\n");
 	close(fd);
 }

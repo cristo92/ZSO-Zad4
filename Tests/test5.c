@@ -8,8 +8,9 @@
 #include <string.h>
 #include "transdb.h"
 
-char data[] = "Teatr-Akcje";
-char buff[10];
+char data[] = 
+	"1111AAAA1111AAAA1111BBBB1111BBBB2222CCCC2222CCCC2222DDDD2222DDDD3333EEEE3333EEEE3333FFFF3333FFFF";
+char buff[32 * 3];
 
 int main() {
 	int fd, ret;
@@ -18,11 +19,11 @@ int main() {
 		printf("FAIL: open1 errno: %d, %s\n", errno, strerror(errno));
 	}
 	assert(fd >= 0);
-	ret = write(fd, data, 10);
-	if(ret != 10) {
+	ret = pwrite(fd, data + 32 -4, 40, 32 - 4);
+	if(ret != 40) {
 		printf("FAIL: write1: %d errno: %d, %s\n", ret, errno, strerror(errno));
 	}
-	assert(ret == 10);
+	assert(ret == 40);
 	ret = ioctl(fd, DB_COMMIT);
 	if(ret != 0) {
 		printf("FAIL: db_commit errno: %d, %s\n", errno, strerror(errno));
@@ -35,13 +36,11 @@ int main() {
 		printf("FAIL: open2 errno: %d, %s\n", errno, strerror(errno));
 	}
 	assert(fd >= 0);
-	ret = read(fd, buff, 10);
-	if(ret != 10) {
+	ret = pread(fd, buff, 40, 32 - 4);
+	if(ret != 40) {
 		printf("FAIL: read2: %d fd: %d errno: %d, %s\n", ret, fd, errno, strerror(errno));
 	}
-	assert(ret == 10);
-	write(0, buff, 10);
-	printf("\n");
-	assert(strncmp(buff, data, 10) == 0);
+	assert(ret == 40);
+	assert(strncmp(buff, data + 32 - 4, 40) == 0);
 	close(fd);
 }

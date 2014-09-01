@@ -27,7 +27,5 @@ int main(int argc, char **argv) {
 	assert(ret == n);
 	if(argv[2][0] == '1') ret = ioctl(fd, DB_COMMIT);
 	else ret = ioctl(fd, DB_ROLLBACK);
-	if(ret != 0) printf("FAIL\n");
-	else printf("ACCEPT\n");
 	close(fd);
 }
