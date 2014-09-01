@@ -5,13 +5,14 @@
 
 /*
 TODO:
-	co to znaczy nieskonczona baza danych?
+	Czyszczenie bazy danych przy odmontowaniu
 	Test4 na llseek (nie umiem wywolac w userspace llseek)
 	Test7 z watkami pthread
+	Test8 na równoległy odczyt
 	*/
 
 /* TESTOWANIE:
-	- wielowatkowosc
+	Opisane w testall.sh
 	*/
 
 /* ROZWIAZANIE:
@@ -90,7 +91,6 @@ dev_t db_dev;
 int db_major;
 struct class *db_class;
 struct device *db_device;
-uint8_t db[DB_SIZE];
 struct rw_semaphore db_rwsema;
 struct semaphore db_glsema;
 uint32_t db_timestamp, db_counter;
@@ -236,12 +236,6 @@ ssize_t transdb_read(struct file *filp, char __user *buff, size_t count, loff_t 
 out:
 	return size - count;
 }
-ssize_t transdb_pread(struct file *filp, char __user *buff, size_t count, loff_t offp) {
-	int ret;
-	ret = transdb_read(filp, buff, count, &offp);
-	if(ret >= 0) offp -= ret;
-	return ret;
-}
 
 ssize_t transdb_write(struct file *filp, const char __user *buff, size_t count,
 		                loff_t *offp) {
@@ -283,11 +277,6 @@ ssize_t transdb_write(struct file *filp, const char __user *buff, size_t count,
 out:
 	up(&trans->sema);
 	return size - count;
-}
-ssize_t transdb_pwrite(struct file *filp, char __user *buff, size_t count, loff_t offp) {
-	int ret = transdb_write(filp, buff, count, &offp);
-	if(ret >= 0) offp -= ret;
-	return ret;
 }
 
 loff_t transdb_llseek(struct file *filp, loff_t off, int whence) {
@@ -402,9 +391,7 @@ const static struct file_operations db_fops = {
 	owner: THIS_MODULE,
 	open: transdb_open,
 	read: transdb_read,
-	//pread: transdb_pread,
 	write: transdb_write,
-	//pwrite: transdb_pwrite,
 	llseek: transdb_llseek,
 	release: transdb_release,
 	unlocked_ioctl: transdb_ioctl,
@@ -447,6 +434,13 @@ void transdb_cleanup_module(void) {
 	unregister_chrdev(db_major, "db");
 	device_destroy(db_class, db_dev);
 	class_destroy(db_class);
+
+	struct db_block *pos, *temp;
+	/* Free database */
+	rbtree_postorder_for_each_entry_safe(pos, temp, &db_root, node) {
+		rb_erase(&pos->node, &db_root);
+		kfree(pos);
+	}
 }
 
 module_init(transdb_init_module);
