@@ -17,6 +17,15 @@ WRONG() {
 	printf "Test%d\t[\e[30mWRONG\e[0m]\n" $1
 }
 
+CHECK() {
+	if [ $? -eq 0 ]
+	then 
+		OK $1
+	else
+		WRONG $1
+	fi
+}
+
 # Test 1
 ./test1
 if [ $? -eq 0 ]
@@ -48,3 +57,17 @@ else
 	WRONG 3
 fi
 
+# Test 5
+./test5
+CHECK 5
+
+# Test 6
+./test6a 64 "&&&&llllmmmm" 1 & ./test6a 16 "&&&&bbbbccccdddd" 1 & \
+./test6a 32 "&&&&eeeeffffgggghhhhiiiijjjjkkkk" 1 & \
+./test6a 64 "&&&&llllmmmm" 0 & ./test6a 16 "&&&&bbbbccccdddd" 0 & \
+./test6a 32 "&&&&eeeeffffgggghhhhiiiijjjjkkkk" 0 & \
+./test6a 64 "&&&&llllmmmm" 1 & ./test6a 16 "&&&&bbbbccccdddd" 1 & \
+./test6a 32 "&&&&eeeeffffgggghhhhiiiijjjjkkkk" 1 &
+
+./test6b 16 "&&&&bbbbccccdddd&&&&eeeeffffgggghhhhiiiijjjjkkkk&&&&llllmmmm"
+CHECK 6

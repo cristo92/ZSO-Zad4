@@ -9,7 +9,7 @@ install:
 clean:
 	$(MAKE) -C $(KDIR) M=$$PWD clean
 
-test: test1 test2a test2b test3 test4
+test: test1 test2a test2b test3 test4 test5 test6a test6b
 
 test1: test1.c
 	gcc -o test1 test1.c
@@ -25,3 +25,12 @@ test3: test3.c
 
 test4: test4.c
 	gcc -o test4 test4.c
+
+test5: test5.c
+	gcc -o test5 test5.c
+
+test6a: test6a.c
+	gcc -o test6a test6a.c
+
+test6b: test6b.c
+	gcc -o test6b test6b.c

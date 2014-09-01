@@ -7,6 +7,7 @@
 TODO:
 	co to znaczy nieskonczona baza danych?
 	Test4 na llseek (nie umiem wywolac w userspace llseek)
+	Test7 z watkami pthread
 	*/
 
 /* TESTOWANIE:
@@ -46,9 +47,15 @@ TODO:
 		- Proszę zwrócić uwagę, że w kroku 4. wszystkie otwarte transakcje zostały 
 		  utworzone przed zapisaniem, tej transakcji, więc będą musiały być porzucone.
 
-TODO:
-	Dane w bazie danych podzieliłem na 32 bajtowe bloki, każdy blok ma 4 bajty na
-	metadane: znaczniki czasu. 
+	Nieskończona baza danych:
+		Bazę danych podzieliłem na 32-bajtowe bloki (struct db_block), które
+		przechowuję w strukturze rbtree (z bibliotek kernela).
+		Jak chcę się odwołać do jakiś danych w bazie danych, to najpierw lokalizuję
+		blok, który przechowuje te dane, później szukam bloku w drzewie, a następnie
+		jeśli bloku nie znalazłem to dodaję go do drzewa.
+		Poza tym struktura db_block przechowuje 4-bajtowy znacznik czasu - używany do
+		pozwalania na równoległe nieskonfliktowane zapisy.
+
 	*/
 
 /* HIERARCHIA SEMAFOROW
@@ -77,8 +84,6 @@ MODULE_DESCRIPTION("Database");
 MODULE_LICENSE("GPL");
 
 #define DB_SIZE 1024024
-#define ACCEPT 1
-#define ROLLBACK 2
 #define db_minor 123
 
 dev_t db_dev;
@@ -89,10 +94,24 @@ uint8_t db[DB_SIZE];
 struct rw_semaphore db_rwsema;
 struct semaphore db_glsema;
 uint32_t db_timestamp, db_counter;
+uint8_t ZERO_DATA[DB_BLOCK_SIZE];
+struct rb_root db_root;
+
+struct db_block {
+	/* It holds data in 
+		(id << DB_BLOCK_SHIFT, id << DB_BLOCK_SHIFT + DB_BLOCK_SIZE - 1) */
+	struct rb_node node;
+	loff_t id;
+	uint32_t ts; //timestamp
+	uint8_t data[DB_BLOCK_SIZE];
+};
 
 struct needle {
-	loff_t pos;
-	uint8_t data;
+	/* It write data in 
+		(id << DB_BLOCK_SHIFT + beg, id << DB_BLOCK_SHIFT + end) */
+	loff_t id;
+	uint8_t beg, end;
+	uint8_t data[DB_BLOCK_SIZE];
 	struct list_head list;
 };
 
@@ -101,6 +120,47 @@ struct transaction {
 	struct list_head list; //list of needles
 	struct semaphore sema;
 };
+
+// Red-Black Tree functions
+struct db_block *rb_search(struct rb_root *root, loff_t x)
+{
+  	struct rb_node *node = root->rb_node;
+
+  	while (node) {
+  		struct db_block *data = container_of(node, struct db_block, node);
+
+		if(x < data->id)
+			node = node->rb_left;
+		else if(x > data->id)
+			node = node->rb_right;
+		else 
+			return data;
+	}
+	return NULL;
+}
+
+int rb_insert(struct rb_root *root, struct db_block *data) 
+{
+	struct rb_node **new = &(root->rb_node), *parent = NULL;
+
+	while(*new) {
+		struct db_block *this = container_of(*new, struct db_block, node);
+		parent = *new;
+		if(data->id < this->id) 
+			new = &((*new)->rb_left);
+		else if(data->id > this->id)
+			new = &((*new)->rb_right);
+		else
+			return -1;
+	}
+
+	rb_link_node(&data->node, parent, new);
+	rb_insert_color(&data->node, root);
+
+	return 0;
+}
+
+///////////////////////////
 
 void is_active(struct transaction *trans) {
 	char bool = 0;
@@ -144,9 +204,37 @@ ssize_t transdb_read(struct file *filp, char __user *buff, size_t count, loff_t 
 	struct transaction *trans = (struct transaction*)filp->private_data;
 	is_active(trans);
 
-	if(copy_to_user(buff, db + *offp, count)) return -EFAULT;
-	*offp += count;
-	return count;
+	struct db_block *blk;
+	size_t size = count;
+	loff_t first = (*offp) >> DB_BLOCK_SHIFT;
+	loff_t last = (*offp + count - 1) >> DB_BLOCK_SHIFT;
+	loff_t i;
+	uint8_t off_b;
+	uint8_t off_e;
+
+	for(i = first; i <= last; i++) {
+		if(i == first) off_b = (*offp) & (DB_BLOCK_SIZE - 1);
+		else off_b = 0;
+		if(i == last) off_e = (*offp + count - 1) & (DB_BLOCK_SIZE - 1); 
+		else off_e = DB_BLOCK_SIZE - 1;
+
+		blk = rb_search(&db_root, i);
+		if(blk == NULL) {
+			if(copy_to_user(buff, ZERO_DATA, off_e - off_b + 1)) 
+				goto out;
+		}
+		else {
+			if(copy_to_user(buff, blk->data + off_b, off_e - off_b + 1))
+				goto out;
+		}
+
+		buff += off_e - off_b + 1;
+		count -= off_e - off_b + 1;
+		*offp += off_e - off_b + 1;
+	}
+
+out:
+	return size - count;
 }
 ssize_t transdb_pread(struct file *filp, char __user *buff, size_t count, loff_t offp) {
 	int ret;
@@ -162,19 +250,36 @@ ssize_t transdb_write(struct file *filp, const char __user *buff, size_t count,
 	int size = count;
 	is_active(trans);
 	down(&trans->sema);
-	while(count) {
-		op = kmalloc(sizeof(struct needle), GFP_KERNEL); 
+
+	loff_t first = (*offp) >> DB_BLOCK_SHIFT;
+	loff_t last  = (*offp + count - 1) >> DB_BLOCK_SHIFT;
+	loff_t i;
+	uint8_t off_b = (*offp) & (DB_BLOCK_SIZE - 1);
+	uint8_t off_e = (*offp + count - 1) & (DB_BLOCK_SIZE - 1);
+	
+	for(i = first; i <= last; i++) {
+		op = kmalloc(sizeof(struct needle), GFP_KERNEL);
 		if(op == 0) goto out;
-		op->pos = *offp;
-		if(copy_from_user(&op->data, buff, 1)) {
+		op->id = i;
+
+		if(i == first) op->beg = off_b;
+		else op->beg = 0;
+		if(i == last) op->end = off_e;
+		else op->end = DB_BLOCK_SIZE - 1;
+
+		if(copy_from_user(op->data + op->beg, 
+								buff, 
+								op->end - op->beg + 1)) {
 			kfree(op);
 			goto out;
 		}
+
 		list_add(&op->list, &trans->list);
-		count--;
-		(*offp)++;
-		buff++;
+		count -= (op->end - op->beg + 1);
+		buff += (op->end - op->beg + 1);
+		*offp += (op->end - op->beg + 1);
 	}
+
 out:
 	up(&trans->sema);
 	return size - count;
@@ -194,7 +299,7 @@ loff_t transdb_llseek(struct file *filp, loff_t off, int whence) {
 			filp->f_pos += off;
 			break;
 		case SEEK_END:
-			filp->f_pos = DB_SIZE + off;
+			return -EINVAL;
 	}
 	return filp->f_pos;
 }
@@ -216,31 +321,53 @@ void delete_list(struct transaction *trans) {
 }
 
 int accept_trans(struct transaction *trans) {
+	int bool = 0;
 	struct needle *pos;
 	struct needle *temp;
+	struct db_block *blk;
 
 	up_read(&db_rwsema);
 	down_write(&db_rwsema); 
 	down(&trans->sema);
-	printk(KERN_WARNING "Accept trans: %d\n", trans->id);
-	down(&db_glsema);
+	printk(KERN_WARNING "Accept trans begin: %d\n", trans->id);
 
-	if(trans->id <= db_timestamp) {
-		up(&db_glsema);
+	list_for_each_entry(pos, &trans->list, list) {
+		if((blk = rb_search(&db_root, pos->id)) == NULL) continue;
+		if(blk->ts > trans->id) {
+			bool = 1;
+			break;
+		}
+	}
+
+	if(bool) {
 		up_write(&db_rwsema);
 		delete_list_with_lock(trans);
 		return -EDEADLK;
 	}
-	db_timestamp = db_counter;
-	up(&db_glsema);
 	trans->id = 0;
 
 	list_for_each_entry_safe(pos, temp, &trans->list, list) {
-		db[pos->pos] = pos->data;
+		blk = rb_search(&db_root, pos->id);
+		if(blk == NULL) {
+			blk = kmalloc(sizeof(struct db_block), GFP_KERNEL);
+			if(blk == NULL) {
+				up_write(&db_rwsema);
+				delete_list_with_lock(trans);
+				return -ENOMEM;
+			}
+		 	blk->id = pos->id;
+			memset(blk->data, 0, DB_BLOCK_SIZE);
+			rb_insert(&db_root, blk);
+		}
+		blk->ts = db_counter;
+		memcpy(blk->data + pos->beg, 
+				 pos->data + pos->beg, 
+				 pos->end - pos->beg + 1);
 		list_del(&pos->list);
 		kfree(pos);
 	}
 
+	printk(KERN_WARNING "Accept trans end: %d\n", trans->id);
 	up(&trans->sema);
 	up_write(&db_rwsema);
 	return 0;
@@ -302,9 +429,12 @@ int transdb_init_module(void) {
 	}
 
 	printk(KERN_WARNING "Module init %d\n", db_major);
+	/* Init read-write semaphore */
 	init_rwsem(&db_rwsema);
+	/* Init global semaphore */
 	sema_init(&db_glsema, 1);
-	memset(db, DB_SIZE, 0);
+	/* Init read-black tree to store database */
+	db_root = RB_ROOT;
 	
 	return 0;
 error2:
